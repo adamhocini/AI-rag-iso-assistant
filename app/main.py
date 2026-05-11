@@ -1,19 +1,20 @@
 import sys
 from pathlib import Path
 
+import pandas as pd
 import streamlit as st
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.logger import log_rag_interaction
+from app.logger import get_log_path, log_rag_interaction
 from app.rag_engine import ask_rag
 from app.ollama_client import is_ollama_available, get_ollama_model
 
 
 st.set_page_config(
-    page_title="Assistant IA RAG ISO",
+    page_title="IA RAG ISO",
     page_icon="📚",
     layout="wide",
 )
@@ -101,9 +102,165 @@ def display_extracts(extracts: list[dict]) -> None:
             st.write(extract["text"])
 
 
-def main() -> None:
-    st.title("📚 Assistant IA RAG ISO")
-    st.caption("PoC local : documentation ISO fictive, ChromaDB, Streamlit et Ollama.")
+def load_interaction_history() -> pd.DataFrame:
+    """
+    Charge l'historique des interactions RAG depuis le CSV local.
+    """
+
+    log_path = get_log_path()
+
+    if not log_path.exists():
+        return pd.DataFrame()
+
+    try:
+        return pd.read_csv(log_path)
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame()
+
+
+def display_history() -> None:
+    """
+    Affiche l'historique des interactions dans Streamlit.
+    """
+
+    st.header("Historique des interactions")
+    st.caption("Journal local des questions, réponses, sources, scores et alertes.")
+
+    history = load_interaction_history()
+
+    if history.empty:
+        st.info("Aucune interaction journalisée pour le moment.")
+        return
+
+    st.write(f"Nombre total d'interactions journalisées : **{len(history)}**")
+
+    available_confidence_labels = sorted(
+        history["confidence_label"].dropna().unique().tolist()
+    ) if "confidence_label" in history.columns else []
+
+    available_intents = sorted(
+        history["detected_intent_label"].dropna().unique().tolist()
+    ) if "detected_intent_label" in history.columns else []
+
+    col_filter_1, col_filter_2, col_filter_3 = st.columns(3)
+
+    with col_filter_1:
+        selected_confidence = st.multiselect(
+            "Filtrer par niveau de confiance",
+            options=available_confidence_labels,
+            default=[],
+        )
+
+    with col_filter_2:
+        selected_intents = st.multiselect(
+            "Filtrer par intention",
+            options=available_intents,
+            default=[],
+        )
+
+    with col_filter_3:
+        only_alerts = st.checkbox(
+            "Afficher uniquement les interactions avec alertes",
+            value=False,
+        )
+
+    filtered_history = history.copy()
+
+    if selected_confidence and "confidence_label" in filtered_history.columns:
+        filtered_history = filtered_history[
+            filtered_history["confidence_label"].isin(selected_confidence)
+        ]
+
+    if selected_intents and "detected_intent_label" in filtered_history.columns:
+        filtered_history = filtered_history[
+            filtered_history["detected_intent_label"].isin(selected_intents)
+        ]
+
+    if only_alerts and "alerts" in filtered_history.columns:
+        filtered_history = filtered_history[
+            filtered_history["alerts"].fillna("").astype(str).str.strip() != ""
+        ]
+
+    st.write(f"Interactions affichées : **{len(filtered_history)}**")
+
+    display_columns = [
+        column for column in [
+            "timestamp",
+            "question",
+            "detected_intent_label",
+            "generation_mode",
+            "confidence_label",
+            "confidence_score",
+            "extract_count",
+            "context_extract_count",
+        ]
+        if column in filtered_history.columns
+    ]
+
+    st.dataframe(
+        filtered_history[display_columns].sort_values(
+            by="timestamp",
+            ascending=False,
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.divider()
+
+    st.subheader("Détail des interactions")
+
+    sorted_history = filtered_history.sort_values(
+        by="timestamp",
+        ascending=False,
+    )
+
+    for _, row in sorted_history.iterrows():
+        timestamp = row.get("timestamp", "Date inconnue")
+        question = row.get("question", "Question inconnue")
+        confidence_label = row.get("confidence_label", "N/A")
+        confidence_score = row.get("confidence_score", "N/A")
+
+        expander_title = (
+            f"{timestamp} | {confidence_label} ({confidence_score}) | {question}"
+        )
+
+        with st.expander(expander_title, expanded=False):
+            st.write(f"**Question :** {question}")
+            st.write(f"**Intention :** {row.get('detected_intent_label', 'N/A')}")
+            st.write(f"**Mode de génération :** {row.get('generation_mode', 'N/A')}")
+            st.write(f"**Niveau de confiance :** {confidence_label} ({confidence_score})")
+
+            confidence_reasons = str(row.get("confidence_reasons", "") or "")
+            if confidence_reasons and confidence_reasons != "nan":
+                st.write("**Explication du score :**")
+                for reason in confidence_reasons.split(" | "):
+                    st.write(f"- {reason}")
+
+            sources = str(row.get("sources", "") or "")
+            if sources and sources != "nan":
+                st.write("**Sources :**")
+                for source in sources.split(" | "):
+                    st.write(f"- {source}")
+
+            alerts = str(row.get("alerts", "") or "")
+            if alerts and alerts != "nan":
+                st.write("**Alertes :**")
+                for alert in alerts.split(" | "):
+                    st.warning(alert)
+            else:
+                st.write("**Alertes :** aucune alerte journalisée.")
+
+            answer = str(row.get("answer", "") or "")
+            if answer and answer != "nan":
+                st.write("**Réponse :**")
+                st.markdown(answer)
+
+
+def display_assistant() -> None:
+    """
+    Affiche l'interface principale de question/réponse.
+    """
 
     with st.sidebar:
         st.header("Configuration")
@@ -144,6 +301,7 @@ def main() -> None:
             "Cette procédure de gestion des risques est-elle encore valide ?",
             "Quelle est la procédure de gestion des non-conformités ?",
             "Prépare une checklist d'audit pour le processus achats.",
+            "Y a-t-il des incohérences entre le compte rendu d'audit et la fiche processus achats ?",
             "Quelle est la politique de cybersécurité de l'entreprise ?",
         ]
 
@@ -263,6 +421,24 @@ def main() -> None:
         with tab_limits:
             for limitation in response.limitations:
                 st.write(f"- {limitation}")
+
+
+def main() -> None:
+    st.title("📚 Assistant IA RAG ISO")
+    st.caption("PoC local : documentation ISO fictive, ChromaDB, Streamlit et Ollama.")
+
+    assistant_tab, history_tab = st.tabs(
+        [
+            "Assistant",
+            "Historique",
+        ]
+    )
+
+    with assistant_tab:
+        display_assistant()
+
+    with history_tab:
+        display_history()
 
 
 if __name__ == "__main__":
