@@ -81,11 +81,19 @@ def display_extracts(extracts: list[dict]) -> None:
         return
 
     for index, extract in enumerate(extracts, start=1):
+        adjusted_score = extract.get("adjusted_score", extract["similarity_score"])
+        intent_bonus = extract.get("intent_bonus", 0.0)
+
         with st.expander(
-            f"Extrait {index} | {extract['reference']} | score {extract['similarity_score']:.3f}",
+            f"Extrait {index} | {extract['reference']} "
+            f"| score {extract['similarity_score']:.3f} "
+            f"| ajusté {adjusted_score:.3f}",
             expanded=False,
         ):
-            st.caption(f"Chunk : {extract['chunk_id']}")
+            st.caption(
+                f"Chunk : {extract['chunk_id']} | "
+                f"Bonus intention : {intent_bonus:.3f}"
+            )
             st.write(extract["text"])
 
 
@@ -194,6 +202,11 @@ def main() -> None:
             st.badge("Réponse générée sans LLM")
 
         st.markdown(response.answer)
+
+        st.info(
+            f"Intention détectée : {response.detected_intent_label} "
+            f"(`{response.detected_intent}`)"
+        )
 
         if log_path:
             st.caption(f"Interaction journalisée dans : `{log_path}`")

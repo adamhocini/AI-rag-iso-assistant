@@ -1,6 +1,11 @@
 from dataclasses import dataclass
 from typing import Any, Dict, List
 
+from app.intent_detector import (
+    detect_intent,
+    get_intent_context_preferences,
+    get_intent_label,
+)
 from app.llm_client import (
     build_rag_prompt,
     generate_answer_with_openai,
@@ -36,6 +41,8 @@ class RagResponse:
     confidence_label: str
     confidence_score: float
     generation_mode: str
+    detected_intent: str
+    detected_intent_label: str
 
 
 def filter_relevant_results(
@@ -52,41 +59,140 @@ def filter_relevant_results(
     ]
 
 
+def compute_intent_bonus(
+    result: Dict[str, Any],
+    intent_preferences: Dict[str, List[str]],
+) -> float:
+    """
+    Calcule un petit bonus métier selon l'intention détectée.
+
+    Ce bonus n'écrase pas le score vectoriel.
+    Il sert seulement à départager des chunks proches.
+    """
+
+    metadata = result["metadata"]
+    text = result["text"].lower()
+
+    bonus = 0.0
+
+    if metadata.get("reference") in intent_preferences.get("preferred_references", []):
+        bonus += 0.08
+
+    if metadata.get("type_document") in intent_preferences.get("preferred_types", []):
+        bonus += 0.04
+
+    preferred_terms = intent_preferences.get("preferred_terms", [])
+
+    matched_terms = [
+        term for term in preferred_terms
+        if term.lower() in text
+    ]
+
+    bonus += min(len(matched_terms) * 0.015, 0.06)
+
+    return min(bonus, 0.16)
+
+
+def add_intent_adjusted_scores(
+    results: List[Dict[str, Any]],
+    detected_intent: str,
+) -> List[Dict[str, Any]]:
+    """
+    Ajoute un score ajusté par intention à chaque résultat.
+    """
+
+    intent_preferences = get_intent_context_preferences(detected_intent)
+
+    adjusted_results = []
+
+    for result in results:
+        result_copy = result.copy()
+        intent_bonus = compute_intent_bonus(result_copy, intent_preferences)
+        adjusted_score = result_copy["similarity_score"] + intent_bonus
+
+        result_copy["intent_bonus"] = intent_bonus
+        result_copy["adjusted_score"] = min(adjusted_score, 1.0)
+
+        adjusted_results.append(result_copy)
+
+    return adjusted_results
+
+
 def select_context_results(
     relevant_results: List[Dict[str, Any]],
+    detected_intent: str,
     max_context_chunks: int = MAX_CONTEXT_CHUNKS,
     score_margin: float = CONTEXT_SCORE_MARGIN,
 ) -> List[Dict[str, Any]]:
     """
-    Sélectionne les chunks qui seront réellement envoyés au LLM.
+    Sélectionne les chunks réellement envoyés au LLM.
 
-    Objectif :
-    - garder le meilleur résultat ;
-    - garder les résultats suffisamment proches du meilleur score ;
-    - limiter le bruit documentaire ;
-    - éviter d'envoyer trop de contexte au modèle local.
+    La sélection utilise :
+    - le score vectoriel ;
+    - un bonus simple selon l'intention détectée ;
+    - des références obligatoires selon certains cas métier.
 
     Exemple :
-    si le meilleur score est 0.70 et la marge est 0.12,
-    on garde les chunks avec un score >= 0.58, dans la limite fixée.
+    pour une preuve d'audit, on veut inclure si possible :
+    - CR-AUD-2025-001, car c'est la preuve métier ;
+    - PROC-AUD-001, car c'est la règle d'audit.
     """
 
     if not relevant_results:
         return []
 
+    intent_preferences = get_intent_context_preferences(detected_intent)
+    required_references = intent_preferences.get("required_references", [])
+
+    adjusted_results = add_intent_adjusted_scores(
+        results=relevant_results,
+        detected_intent=detected_intent,
+    )
+
     sorted_results = sorted(
-        relevant_results,
-        key=lambda result: result["similarity_score"],
+        adjusted_results,
+        key=lambda result: result["adjusted_score"],
         reverse=True,
     )
 
-    best_score = sorted_results[0]["similarity_score"]
-    min_context_score = max(MIN_RELEVANCE_SCORE, best_score - score_margin)
+    selected_results = []
 
-    selected_results = [
-        result for result in sorted_results
-        if result["similarity_score"] >= min_context_score
-    ]
+    # 1. Inclure d'abord les références requises si elles existent
+    for required_reference in required_references:
+        matching_results = [
+            result for result in sorted_results
+            if result["metadata"]["reference"] == required_reference
+        ]
+
+        if matching_results:
+            best_match = max(
+                matching_results,
+                key=lambda result: result["adjusted_score"],
+            )
+
+            if best_match not in selected_results:
+                selected_results.append(best_match)
+
+    # 2. Compléter avec les meilleurs résultats ajustés
+    best_adjusted_score = sorted_results[0]["adjusted_score"]
+    min_context_score = max(
+        MIN_RELEVANCE_SCORE,
+        best_adjusted_score - score_margin,
+    )
+
+    for result in sorted_results:
+        if len(selected_results) >= max_context_chunks:
+            break
+
+        if result in selected_results:
+            continue
+
+        if result["adjusted_score"] >= min_context_score:
+            selected_results.append(result)
+
+    # 3. Si le contexte est encore vide ou trop faible, ajouter le meilleur résultat
+    if not selected_results and sorted_results:
+        selected_results.append(sorted_results[0])
 
     return selected_results[:max_context_chunks]
 
@@ -114,12 +220,26 @@ def build_sources(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "type_document": metadata["type_document"],
                 "source_file": metadata["source_file"],
                 "best_similarity_score": result["similarity_score"],
+                "best_adjusted_score": result.get("adjusted_score", result["similarity_score"]),
+                "intent_bonus": result.get("intent_bonus", 0.0),
             }
         else:
             current_best = unique_sources[reference]["best_similarity_score"]
+            current_best_adjusted = unique_sources[reference]["best_adjusted_score"]
+
             unique_sources[reference]["best_similarity_score"] = max(
                 current_best,
                 result["similarity_score"],
+            )
+
+            unique_sources[reference]["best_adjusted_score"] = max(
+                current_best_adjusted,
+                result.get("adjusted_score", result["similarity_score"]),
+            )
+
+            unique_sources[reference]["intent_bonus"] = max(
+                unique_sources[reference]["intent_bonus"],
+                result.get("intent_bonus", 0.0),
             )
 
     return list(unique_sources.values())
@@ -141,6 +261,8 @@ def build_extracts(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "reference": metadata["reference"],
                 "titre": metadata["titre"],
                 "similarity_score": result["similarity_score"],
+                "adjusted_score": result.get("adjusted_score", result["similarity_score"]),
+                "intent_bonus": result.get("intent_bonus", 0.0),
                 "text": result["text"],
             }
         )
@@ -279,11 +401,10 @@ def ask_rag(
 ) -> RagResponse:
     """
     Point d'entrée principal du moteur RAG.
-
-    Le moteur distingue :
-    - relevant_results : résultats pertinents affichés à l'utilisateur ;
-    - context_results : résultats sélectionnés pour le prompt LLM.
     """
+
+    detected_intent = detect_intent(question)
+    detected_intent_label = get_intent_label(detected_intent)
 
     raw_results = search_similar_chunks(
         query_text=question,
@@ -295,12 +416,27 @@ def ask_rag(
         min_score=min_score,
     )
 
-    context_results = select_context_results(relevant_results)
+    context_results = select_context_results(
+        relevant_results=relevant_results,
+        detected_intent=detected_intent,
+    )
 
-    sources = build_sources(relevant_results)
+    sources = build_sources(
+        add_intent_adjusted_scores(
+            results=relevant_results,
+            detected_intent=detected_intent,
+        )
+    )
+
     context_sources = build_sources(context_results)
 
-    extracts = build_extracts(relevant_results)
+    extracts = build_extracts(
+        add_intent_adjusted_scores(
+            results=relevant_results,
+            detected_intent=detected_intent,
+        )
+    )
+
     context_extracts = build_extracts(context_results)
 
     alerts = detect_document_alerts(sources)
@@ -316,6 +452,7 @@ def ask_rag(
         "Le score de confiance est approximatif dans cette version MVP.",
         "Les extraits doivent être validés par un humain avant usage en audit réel.",
         "L'assistant ne remplace pas un auditeur, un responsable qualité ou une validation documentaire officielle.",
+        f"Intention détectée : {detected_intent_label}.",
         f"{len(context_extracts)} extrait(s) ont été transmis au générateur sur {len(extracts)} extrait(s) pertinent(s) affiché(s).",
     ]
 
@@ -402,4 +539,6 @@ def ask_rag(
         confidence_label=confidence_label,
         confidence_score=confidence_score,
         generation_mode=generation_mode,
+        detected_intent=detected_intent,
+        detected_intent_label=detected_intent_label,
     )

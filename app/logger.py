@@ -64,6 +64,8 @@ def ensure_log_file_exists(log_path: Path) -> None:
     headers = [
         "timestamp",
         "question",
+        "detected_intent",
+        "detected_intent_label",
         "generation_mode",
         "confidence_label",
         "confidence_score",
@@ -90,6 +92,8 @@ def log_rag_interaction(response: Any) -> Path:
     row = {
         "timestamp": datetime.now().isoformat(timespec="seconds"),
         "question": response.question,
+        "detected_intent": response.detected_intent,
+        "detected_intent_label": response.detected_intent_label,
         "generation_mode": response.generation_mode,
         "confidence_label": response.confidence_label,
         "confidence_score": f"{response.confidence_score:.2f}",

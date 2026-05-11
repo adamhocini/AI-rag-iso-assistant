@@ -18,13 +18,6 @@ def print_section(title: str) -> None:
 def parse_arguments() -> tuple[str, bool, bool, bool]:
     """
     Récupère la question et détecte les options.
-
-    Exemples :
-    python scripts/ask_rag.py
-    python scripts/ask_rag.py "Question ici"
-    python scripts/ask_rag.py "Question ici" --ollama
-    python scripts/ask_rag.py "Question ici" --llm
-    python scripts/ask_rag.py "Question ici" --no-log
     """
 
     args = sys.argv[1:]
@@ -75,6 +68,9 @@ def main() -> None:
     print_section("Question")
     print(response.question)
 
+    print_section("Intention détectée")
+    print(f"{response.detected_intent_label} ({response.detected_intent})")
+
     print_section("Mode de génération")
     print(format_generation_mode(response.generation_mode))
 
@@ -95,7 +91,9 @@ def main() -> None:
                 f"| v{source['version']} "
                 f"| {source['statut']} "
                 f"| {source['type_document']} "
-                f"| score max : {source['best_similarity_score']:.3f}"
+                f"| score : {source['best_similarity_score']:.3f} "
+                f"| score ajusté : {source.get('best_adjusted_score', source['best_similarity_score']):.3f} "
+                f"| bonus intention : {source.get('intent_bonus', 0.0):.3f}"
             )
 
     print_section("Extraits pertinents")
@@ -108,10 +106,26 @@ def main() -> None:
             print(
                 f"Extrait {index} | {extract['reference']} "
                 f"| score : {extract['similarity_score']:.3f} "
+                f"| score ajusté : {extract.get('adjusted_score', extract['similarity_score']):.3f} "
+                f"| bonus intention : {extract.get('intent_bonus', 0.0):.3f} "
                 f"| chunk : {extract['chunk_id']}"
             )
             print("-" * 80)
             print(extract["text"][:900].replace("\n", " "))
+
+    print_section("Extraits envoyés au LLM")
+
+    if not response.context_extracts:
+        print("Aucun extrait transmis au générateur.")
+    else:
+        for index, extract in enumerate(response.context_extracts, start=1):
+            print(
+                f"{index}. {extract['reference']} "
+                f"| score : {extract['similarity_score']:.3f} "
+                f"| score ajusté : {extract.get('adjusted_score', extract['similarity_score']):.3f} "
+                f"| bonus intention : {extract.get('intent_bonus', 0.0):.3f} "
+                f"| chunk : {extract['chunk_id']}"
+            )
 
     print_section("Alertes")
 
