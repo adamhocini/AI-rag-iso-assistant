@@ -80,6 +80,11 @@ def main() -> None:
     print_section("Niveau de confiance")
     print(f"{response.confidence_label} ({response.confidence_score:.2f})")
 
+    print_section("Explication du score")
+
+    for reason in response.confidence_reasons:
+        print(f"- {reason}")
+
     print_section("Sources utilisées")
 
     if not response.sources:

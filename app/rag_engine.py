@@ -42,6 +42,7 @@ class RagResponse:
     limitations: List[str]
     confidence_label: str
     confidence_score: float
+    confidence_reasons: List[str]
     generation_mode: str
     detected_intent: str
     detected_intent_label: str
@@ -301,6 +302,15 @@ def compute_simple_confidence(
 ) -> tuple[float, str]:
     """
     Calcule un score de confiance simple et prudent.
+
+    Le score prend en compte :
+    - la similarité vectorielle ;
+    - le nombre de sources ;
+    - le statut des documents ;
+    - les alertes documentaires ;
+    - les incohérences de version détectées.
+
+    Ce score reste un indicateur métier approximatif.
     """
 
     if not relevant_results:
@@ -314,8 +324,10 @@ def compute_simple_confidence(
     best_score = max(similarity_scores)
     average_score = sum(similarity_scores) / len(similarity_scores)
 
+    # Base principale : pertinence documentaire
     confidence_score = (best_score * 0.65) + (average_score * 0.25)
 
+    # Bonus limité si plusieurs sources distinctes confirment la réponse
     if len(sources) >= 3:
         confidence_score += 0.07
     elif len(sources) == 2:
@@ -323,13 +335,32 @@ def compute_simple_confidence(
     elif len(sources) == 1:
         confidence_score += 0.02
 
+    # Pénalité pour les documents non validés
     non_validated_sources = [
         source for source in sources
         if source["statut"].lower() != "validé"
     ]
 
-    confidence_score -= min(len(non_validated_sources) * 0.12, 0.30)
-    confidence_score -= min(len(alerts) * 0.08, 0.20)
+    non_validated_penalty = min(len(non_validated_sources) * 0.12, 0.30)
+
+    # Pénalité pour les alertes génériques
+    generic_alert_count = len(alerts)
+    generic_alert_penalty = min(generic_alert_count * 0.05, 0.15)
+
+    # Pénalité spécifique pour les incohérences de version
+    version_inconsistency_alerts = [
+        alert for alert in alerts
+        if "Incohérence de version détectée" in alert
+    ]
+
+    version_inconsistency_penalty = min(
+        len(version_inconsistency_alerts) * 0.18,
+        0.36,
+    )
+
+    confidence_score -= non_validated_penalty
+    confidence_score -= generic_alert_penalty
+    confidence_score -= version_inconsistency_penalty
 
     confidence_score = max(0.0, min(confidence_score, 0.95))
 
@@ -343,6 +374,84 @@ def compute_simple_confidence(
         label = "Très faible"
 
     return confidence_score, label
+
+
+def build_confidence_reasons(
+    relevant_results: List[Dict[str, Any]],
+    sources: List[Dict[str, Any]],
+    alerts: List[str],
+) -> List[str]:
+    """
+    Produit une explication lisible du score de confiance.
+    """
+
+    reasons = []
+
+    if not relevant_results:
+        return [
+            "Aucun extrait suffisamment pertinent n'a été retrouvé."
+        ]
+
+    similarity_scores = [
+        result["similarity_score"]
+        for result in relevant_results
+    ]
+
+    best_score = max(similarity_scores)
+    average_score = sum(similarity_scores) / len(similarity_scores)
+
+    reasons.append(
+        f"Meilleur score de similarité : {best_score:.3f}."
+    )
+
+    reasons.append(
+        f"Score moyen de similarité : {average_score:.3f}."
+    )
+
+    reasons.append(
+        f"{len(sources)} source(s) distincte(s) pertinente(s) retrouvée(s)."
+    )
+
+    non_validated_sources = [
+        source for source in sources
+        if source["statut"].lower() != "validé"
+    ]
+
+    if non_validated_sources:
+        references = ", ".join(
+            source["reference"]
+            for source in non_validated_sources
+        )
+        reasons.append(
+            f"Document(s) non pleinement validé(s) détecté(s) : {references}."
+        )
+
+    version_inconsistency_alerts = [
+        alert for alert in alerts
+        if "Incohérence de version détectée" in alert
+    ]
+
+    if version_inconsistency_alerts:
+        reasons.append(
+            f"{len(version_inconsistency_alerts)} incohérence(s) de version détectée(s), ce qui réduit la confiance."
+        )
+
+    generic_alerts = [
+        alert for alert in alerts
+        if "Incohérence de version détectée" not in alert
+    ]
+
+    if generic_alerts:
+        reasons.append(
+            f"{len(generic_alerts)} autre(s) alerte(s) documentaire(s) détectée(s)."
+        )
+
+    if not alerts and not non_validated_sources:
+        reasons.append(
+            "Aucune alerte documentaire majeure détectée."
+        )
+
+    return reasons
 
 
 def build_answer_without_llm(
@@ -455,6 +564,12 @@ def ask_rag(
         alerts=alerts,
     )
 
+    confidence_reasons = build_confidence_reasons(
+        relevant_results=relevant_results,
+        sources=sources,
+        alerts=alerts,
+    )
+
     limitations = [
         "Le score de confiance est approximatif dans cette version MVP.",
         "Les extraits doivent être validés par un humain avant usage en audit réel.",
@@ -545,6 +660,7 @@ def ask_rag(
         limitations=limitations,
         confidence_label=confidence_label,
         confidence_score=confidence_score,
+        confidence_reasons=confidence_reasons,
         generation_mode=generation_mode,
         detected_intent=detected_intent,
         detected_intent_label=detected_intent_label,

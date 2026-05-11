@@ -19,7 +19,7 @@ st.set_page_config(
 )
 
 
-def display_confidence(label: str, score: float) -> None:
+def display_confidence(label: str, score: float, reasons: list[str]) -> None:
     """
     Affiche le niveau de confiance avec un message métier.
     """
@@ -37,6 +37,10 @@ def display_confidence(label: str, score: float) -> None:
         st.warning("La réponse repose sur des sources limitées, fragiles ou à vérifier.")
     else:
         st.error("Les documents disponibles ne permettent pas de répondre de manière fiable.")
+
+    with st.expander("Voir l'explication du score", expanded=False):
+        for reason in reasons:
+            st.write(f"- {reason}")
 
 
 def display_sources(sources: list[dict]) -> None:
@@ -219,6 +223,7 @@ def main() -> None:
             display_confidence(
                 label=response.confidence_label,
                 score=response.confidence_score,
+                reasons=response.confidence_reasons,
             )
 
         with col_alerts:
