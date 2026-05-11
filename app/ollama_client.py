@@ -19,8 +19,6 @@ def get_ollama_model() -> str:
 def is_ollama_available() -> bool:
     """
     Vérifie rapidement si le service Ollama local répond.
-
-    On interroge /api/tags, qui liste les modèles disponibles.
     """
 
     base_url = get_ollama_base_url()
@@ -46,8 +44,11 @@ def build_ollama_rag_prompt(
     """
     Construit un prompt RAG strict pour un modèle local Ollama.
 
-    Les modèles locaux peuvent halluciner plus facilement.
-    Le prompt est donc volontairement très cadré.
+    Objectif :
+    - limiter les hallucinations ;
+    - éviter les formulations trop catégoriques ;
+    - imposer la citation des sources ;
+    - respecter les statuts documentaires.
     """
 
     sources_text = []
@@ -58,6 +59,7 @@ def build_ollama_rag_prompt(
             f"  Titre : {source['titre']}\n"
             f"  Version : {source['version']}\n"
             f"  Statut : {source['statut']}\n"
+            f"  Date de validation : {source['date_validation']}\n"
             f"  Type : {source['type_document']}\n"
             f"  Processus : {source['processus']}\n"
         )
@@ -76,17 +78,38 @@ def build_ollama_rag_prompt(
     alerts_text = "\n".join(f"- {alert}" for alert in alerts) if alerts else "Aucune alerte documentaire détectée."
 
     prompt = f"""
-Tu es un assistant IA RAG spécialisé dans une documentation qualité ISO fictive.
+Tu es un assistant IA RAG spécialisé dans l'analyse d'une documentation qualité ISO fictive.
 
-IMPORTANT :
+CONTEXTE :
 - RAG signifie Retrieval-Augmented Generation.
-- Tu ne dois pas inventer.
-- Tu dois répondre uniquement à partir des extraits fournis.
-- Tu ne dois pas utiliser de connaissances externes.
-- Si les extraits ne permettent pas de répondre, dis : "Je ne peux pas répondre de manière fiable avec les documents disponibles."
-- Cite explicitement les références documentaires utilisées.
-- Si un document a un statut différent de "Validé", signale-le dans les points de vigilance.
-- Ne dis jamais que l'IA remplace un auditeur ou une validation humaine.
+- Tu aides à analyser des documents qualité fictifs.
+- Tu ne remplaces jamais un auditeur, un responsable qualité ou une validation humaine.
+
+RÈGLES ABSOLUES :
+1. Réponds uniquement avec les sources et extraits fournis.
+2. N'utilise aucune connaissance externe.
+3. N'invente aucun document, aucune référence, aucune date, aucune preuve.
+4. Si les extraits ne suffisent pas, dis clairement ce qui manque.
+5. Cite les références exactes utilisées, par exemple PROC-AUD-001 ou CR-AUD-2025-001.
+6. Ne cite pas une source si elle n'aide pas réellement à répondre à la question.
+7. Ne donne jamais un niveau de certitude supérieur au niveau calculé par le système.
+8. Ne dis jamais que l'IA remplace une validation humaine.
+
+RÈGLES SUR LES STATUTS DOCUMENTAIRES :
+- Un document au statut "Validé" peut être utilisé comme source applicable dans le cadre du PoC.
+- Un document au statut "En révision" peut être consulté, mais ne doit pas être présenté comme pleinement applicable.
+- Un document au statut "En révision" ne doit PAS être décrit comme "obsolète", "invalide" ou "non valide", sauf si un extrait le dit explicitement.
+- Formulation correcte pour un document "En révision" :
+  "Le document est en révision ; il ne doit pas être utilisé comme seule référence applicable sans validation humaine."
+- Si une contradiction de version est mentionnée dans les extraits, signale-la comme point de vigilance.
+
+STYLE DE RÉPONSE :
+- Réponds en français.
+- Sois clair, précis et prudent.
+- Ne sois pas trop long.
+- Ne répète pas tous les extraits.
+- Préfère une réponse métier exploitable.
+- Utilise des puces si cela améliore la lisibilité.
 
 Question utilisateur :
 {question}
@@ -103,16 +126,20 @@ Alertes documentaires :
 Extraits autorisés :
 {chr(10).join(extracts_text) if extracts_text else "Aucun extrait suffisamment pertinent."}
 
-Format de réponse obligatoire :
+FORMAT DE RÉPONSE OBLIGATOIRE :
 
 ## Réponse synthétique
-Réponds clairement à la question en quelques phrases.
+Réponds directement à la question à partir des extraits.
 
 ## Sources utilisées
-Liste les références utilisées avec leur titre.
+Liste uniquement les références réellement utilisées avec leur titre.
 
 ## Points de vigilance
-Mentionne les documents en révision, les limites ou les éléments à vérifier.
+Mentionne :
+- les documents en révision ;
+- les contradictions de version ;
+- les preuves manquantes ;
+- les limites d'interprétation.
 
 ## Limites
 Explique ce qui ne peut pas être affirmé avec certitude.
@@ -134,7 +161,8 @@ def generate_answer_with_ollama(prompt: str) -> str:
         "prompt": prompt,
         "stream": False,
         "options": {
-            "temperature": 0.2,
+            "temperature": 0.1,
+            "top_p": 0.8,
             "num_ctx": 8192
         }
     }

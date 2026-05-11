@@ -7,6 +7,7 @@ import streamlit as st
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from app.logger import log_rag_interaction
 from app.rag_engine import ask_rag
 from app.ollama_client import is_ollama_available, get_ollama_model
 
@@ -117,6 +118,13 @@ def main() -> None:
 
         st.divider()
 
+        enable_logging = st.checkbox(
+            "Journaliser les interactions",
+            value=True,
+        )
+
+        st.divider()
+
         st.subheader("Questions de démonstration")
 
         demo_questions = [
@@ -172,6 +180,10 @@ def main() -> None:
                 use_ollama=use_ollama,
             )
 
+            log_path = None
+            if enable_logging:
+                log_path = log_rag_interaction(response)
+
         st.divider()
 
         st.subheader("Réponse")
@@ -182,6 +194,9 @@ def main() -> None:
             st.badge("Réponse générée sans LLM")
 
         st.markdown(response.answer)
+
+        if log_path:
+            st.caption(f"Interaction journalisée dans : `{log_path}`")
 
         st.divider()
 
@@ -204,10 +219,11 @@ def main() -> None:
 
         st.divider()
 
-        tab_sources, tab_extracts, tab_limits = st.tabs(
+        tab_sources, tab_extracts, tab_context, tab_limits = st.tabs(
             [
                 "Sources utilisées",
                 "Extraits pertinents",
+                "Extraits envoyés au LLM",
                 "Limites",
             ]
         )
@@ -217,6 +233,14 @@ def main() -> None:
 
         with tab_extracts:
             display_extracts(response.relevant_extracts)
+
+        with tab_context:
+            st.caption(
+                "Ces extraits sont ceux réellement transmis au générateur "
+                "LLM/Ollama. Les autres extraits pertinents restent affichés "
+                "pour transparence."
+            )
+            display_extracts(response.context_extracts)
 
         with tab_limits:
             for limitation in response.limitations:

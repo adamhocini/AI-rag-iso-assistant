@@ -15,7 +15,9 @@ from app.vector_store import search_similar_chunks
 
 
 MIN_RELEVANCE_SCORE = 0.45
-DEFAULT_TOP_K = 5
+DEFAULT_TOP_K = 6
+MAX_CONTEXT_CHUNKS = 3
+CONTEXT_SCORE_MARGIN = 0.12
 
 
 @dataclass
@@ -28,6 +30,7 @@ class RagResponse:
     answer: str
     sources: List[Dict[str, Any]]
     relevant_extracts: List[Dict[str, Any]]
+    context_extracts: List[Dict[str, Any]]
     alerts: List[str]
     limitations: List[str]
     confidence_label: str
@@ -49,9 +52,48 @@ def filter_relevant_results(
     ]
 
 
+def select_context_results(
+    relevant_results: List[Dict[str, Any]],
+    max_context_chunks: int = MAX_CONTEXT_CHUNKS,
+    score_margin: float = CONTEXT_SCORE_MARGIN,
+) -> List[Dict[str, Any]]:
+    """
+    Sélectionne les chunks qui seront réellement envoyés au LLM.
+
+    Objectif :
+    - garder le meilleur résultat ;
+    - garder les résultats suffisamment proches du meilleur score ;
+    - limiter le bruit documentaire ;
+    - éviter d'envoyer trop de contexte au modèle local.
+
+    Exemple :
+    si le meilleur score est 0.70 et la marge est 0.12,
+    on garde les chunks avec un score >= 0.58, dans la limite fixée.
+    """
+
+    if not relevant_results:
+        return []
+
+    sorted_results = sorted(
+        relevant_results,
+        key=lambda result: result["similarity_score"],
+        reverse=True,
+    )
+
+    best_score = sorted_results[0]["similarity_score"]
+    min_context_score = max(MIN_RELEVANCE_SCORE, best_score - score_margin)
+
+    selected_results = [
+        result for result in sorted_results
+        if result["similarity_score"] >= min_context_score
+    ]
+
+    return selected_results[:max_context_chunks]
+
+
 def build_sources(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
-    Construit une liste de sources uniques à partir des chunks retrouvés.
+    Construit une liste de sources uniques à partir des chunks fournis.
     """
 
     unique_sources = {}
@@ -85,7 +127,7 @@ def build_sources(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 def build_extracts(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
-    Prépare les extraits pertinents à afficher à l'utilisateur.
+    Prépare les extraits à afficher ou à transmettre au LLM.
     """
 
     extracts = []
@@ -238,10 +280,9 @@ def ask_rag(
     """
     Point d'entrée principal du moteur RAG.
 
-    Modes disponibles :
-    - sans LLM ;
-    - OpenAI API ;
-    - Ollama local.
+    Le moteur distingue :
+    - relevant_results : résultats pertinents affichés à l'utilisateur ;
+    - context_results : résultats sélectionnés pour le prompt LLM.
     """
 
     raw_results = search_similar_chunks(
@@ -254,9 +295,16 @@ def ask_rag(
         min_score=min_score,
     )
 
+    context_results = select_context_results(relevant_results)
+
     sources = build_sources(relevant_results)
+    context_sources = build_sources(context_results)
+
     extracts = build_extracts(relevant_results)
+    context_extracts = build_extracts(context_results)
+
     alerts = detect_document_alerts(sources)
+    context_alerts = detect_document_alerts(context_sources)
 
     confidence_score, confidence_label = compute_simple_confidence(
         relevant_results=relevant_results,
@@ -268,17 +316,18 @@ def ask_rag(
         "Le score de confiance est approximatif dans cette version MVP.",
         "Les extraits doivent être validés par un humain avant usage en audit réel.",
         "L'assistant ne remplace pas un auditeur, un responsable qualité ou une validation documentaire officielle.",
+        f"{len(context_extracts)} extrait(s) ont été transmis au générateur sur {len(extracts)} extrait(s) pertinent(s) affiché(s).",
     ]
 
     generation_mode = "sans_llm"
 
-    if use_ollama and relevant_results:
+    if use_ollama and context_results:
         if is_ollama_available():
             prompt = build_ollama_rag_prompt(
                 question=question,
-                sources=sources,
-                extracts=extracts,
-                alerts=alerts,
+                sources=context_sources,
+                extracts=context_extracts,
+                alerts=context_alerts,
                 confidence_label=confidence_label,
                 confidence_score=confidence_score,
             )
@@ -304,13 +353,13 @@ def ask_rag(
                 "La génération Ollama a été demandée, mais le service Ollama local ne répond pas."
             )
 
-    elif use_openai and relevant_results:
+    elif use_openai and context_results:
         if is_openai_configured():
             prompt = build_rag_prompt(
                 question=question,
-                sources=sources,
-                extracts=extracts,
-                alerts=alerts,
+                sources=context_sources,
+                extracts=context_extracts,
+                alerts=context_alerts,
                 confidence_label=confidence_label,
                 confidence_score=confidence_score,
             )
@@ -347,6 +396,7 @@ def ask_rag(
         answer=answer,
         sources=sources,
         relevant_extracts=extracts,
+        context_extracts=context_extracts,
         alerts=alerts,
         limitations=limitations,
         confidence_label=confidence_label,
