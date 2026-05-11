@@ -1,6 +1,16 @@
 from dataclasses import dataclass
 from typing import Any, Dict, List
 
+from app.llm_client import (
+    build_rag_prompt,
+    generate_answer_with_openai,
+    is_openai_configured,
+)
+from app.ollama_client import (
+    build_ollama_rag_prompt,
+    generate_answer_with_ollama,
+    is_ollama_available,
+)
 from app.vector_store import search_similar_chunks
 
 
@@ -12,9 +22,6 @@ DEFAULT_TOP_K = 5
 class RagResponse:
     """
     Représente une réponse RAG structurée.
-
-    Pour l'instant, la réponse est générée sans LLM.
-    Elle s'appuie uniquement sur les chunks retrouvés.
     """
 
     question: str
@@ -25,6 +32,7 @@ class RagResponse:
     limitations: List[str]
     confidence_label: str
     confidence_score: float
+    generation_mode: str
 
 
 def filter_relevant_results(
@@ -33,8 +41,6 @@ def filter_relevant_results(
 ) -> List[Dict[str, Any]]:
     """
     Conserve uniquement les résultats suffisamment proches de la question.
-
-    Le seuil est volontairement simple pour le MVP.
     """
 
     return [
@@ -46,9 +52,6 @@ def filter_relevant_results(
 def build_sources(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Construit une liste de sources uniques à partir des chunks retrouvés.
-
-    Plusieurs chunks peuvent venir du même document.
-    On évite donc d'afficher 3 fois la même source.
     """
 
     unique_sources = {}
@@ -106,8 +109,6 @@ def build_extracts(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 def detect_document_alerts(sources: List[Dict[str, Any]]) -> List[str]:
     """
     Détecte des alertes documentaires simples.
-
-    Pour le MVP, on vérifie surtout le statut documentaire.
     """
 
     alerts = []
@@ -134,16 +135,6 @@ def compute_simple_confidence(
 ) -> tuple[float, str]:
     """
     Calcule un score de confiance simple et prudent.
-
-    Le score prend en compte :
-    - le meilleur score de similarité ;
-    - la moyenne des similarités ;
-    - le nombre de sources distinctes ;
-    - le statut des documents ;
-    - la présence d'alertes documentaires.
-
-    Le but n'est pas d'obtenir une vérité mathématique,
-    mais un indicateur lisible pour un utilisateur métier.
     """
 
     if not relevant_results:
@@ -157,10 +148,8 @@ def compute_simple_confidence(
     best_score = max(similarity_scores)
     average_score = sum(similarity_scores) / len(similarity_scores)
 
-    # Base principale : pertinence documentaire
     confidence_score = (best_score * 0.65) + (average_score * 0.25)
 
-    # Bonus limité si plusieurs sources distinctes confirment la réponse
     if len(sources) >= 3:
         confidence_score += 0.07
     elif len(sources) == 2:
@@ -168,15 +157,12 @@ def compute_simple_confidence(
     elif len(sources) == 1:
         confidence_score += 0.02
 
-    # Pénalité si certains documents ne sont pas validés
     non_validated_sources = [
         source for source in sources
         if source["statut"].lower() != "validé"
     ]
 
     confidence_score -= min(len(non_validated_sources) * 0.12, 0.30)
-
-    # Pénalité supplémentaire en cas d'alerte documentaire
     confidence_score -= min(len(alerts) * 0.08, 0.20)
 
     confidence_score = max(0.0, min(confidence_score, 0.95))
@@ -194,16 +180,11 @@ def compute_simple_confidence(
 
 
 def build_answer_without_llm(
-    question: str,
     relevant_results: List[Dict[str, Any]],
-    sources: List[Dict[str, Any]],
     alerts: List[str],
 ) -> str:
     """
     Génère une réponse simple sans LLM.
-
-    Cette réponse n'est pas encore rédigée de manière intelligente.
-    Elle sert à vérifier que le pipeline RAG fonctionne.
     """
 
     if not relevant_results:
@@ -251,16 +232,16 @@ def ask_rag(
     question: str,
     top_k: int = DEFAULT_TOP_K,
     min_score: float = MIN_RELEVANCE_SCORE,
+    use_openai: bool = False,
+    use_ollama: bool = False,
 ) -> RagResponse:
     """
     Point d'entrée principal du moteur RAG.
 
-    1. Recherche les chunks proches de la question.
-    2. Filtre les résultats faibles.
-    3. Construit les sources.
-    4. Détecte les alertes.
-    5. Calcule un score de confiance simple.
-    6. Produit une réponse structurée sans LLM.
+    Modes disponibles :
+    - sans LLM ;
+    - OpenAI API ;
+    - Ollama local.
     """
 
     raw_results = search_similar_chunks(
@@ -277,24 +258,89 @@ def ask_rag(
     extracts = build_extracts(relevant_results)
     alerts = detect_document_alerts(sources)
 
-    limitations = [
-        "Cette réponse est générée sans LLM pour valider le pipeline RAG.",
-        "Le score de confiance est approximatif dans cette version MVP.",
-        "Les extraits doivent être validés par un humain avant usage en audit réel.",
-    ]
-
     confidence_score, confidence_label = compute_simple_confidence(
         relevant_results=relevant_results,
         sources=sources,
         alerts=alerts,
     )
 
-    answer = build_answer_without_llm(
-        question=question,
-        relevant_results=relevant_results,
-        sources=sources,
-        alerts=alerts,
-    )
+    limitations = [
+        "Le score de confiance est approximatif dans cette version MVP.",
+        "Les extraits doivent être validés par un humain avant usage en audit réel.",
+        "L'assistant ne remplace pas un auditeur, un responsable qualité ou une validation documentaire officielle.",
+    ]
+
+    generation_mode = "sans_llm"
+
+    if use_ollama and relevant_results:
+        if is_ollama_available():
+            prompt = build_ollama_rag_prompt(
+                question=question,
+                sources=sources,
+                extracts=extracts,
+                alerts=alerts,
+                confidence_label=confidence_label,
+                confidence_score=confidence_score,
+            )
+
+            try:
+                answer = generate_answer_with_ollama(prompt)
+                generation_mode = "ollama"
+            except RuntimeError as error:
+                answer = (
+                    build_answer_without_llm(
+                        relevant_results=relevant_results,
+                        alerts=alerts,
+                    )
+                    + f" Génération Ollama indisponible : {error}"
+                )
+                limitations.append("La génération Ollama a échoué, réponse sans LLM utilisée.")
+        else:
+            answer = build_answer_without_llm(
+                relevant_results=relevant_results,
+                alerts=alerts,
+            )
+            limitations.append(
+                "La génération Ollama a été demandée, mais le service Ollama local ne répond pas."
+            )
+
+    elif use_openai and relevant_results:
+        if is_openai_configured():
+            prompt = build_rag_prompt(
+                question=question,
+                sources=sources,
+                extracts=extracts,
+                alerts=alerts,
+                confidence_label=confidence_label,
+                confidence_score=confidence_score,
+            )
+
+            try:
+                answer = generate_answer_with_openai(prompt)
+                generation_mode = "openai"
+            except RuntimeError as error:
+                answer = (
+                    build_answer_without_llm(
+                        relevant_results=relevant_results,
+                        alerts=alerts,
+                    )
+                    + f" Génération OpenAI indisponible : {error}"
+                )
+                limitations.append("La génération OpenAI a échoué, réponse sans LLM utilisée.")
+        else:
+            answer = build_answer_without_llm(
+                relevant_results=relevant_results,
+                alerts=alerts,
+            )
+            limitations.append(
+                "La génération OpenAI a été demandée, mais OPENAI_API_KEY n'est pas configurée."
+            )
+
+    else:
+        answer = build_answer_without_llm(
+            relevant_results=relevant_results,
+            alerts=alerts,
+        )
 
     return RagResponse(
         question=question,
@@ -305,4 +351,5 @@ def ask_rag(
         limitations=limitations,
         confidence_label=confidence_label,
         confidence_score=confidence_score,
+        generation_mode=generation_mode,
     )

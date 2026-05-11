@@ -14,16 +14,61 @@ def print_section(title: str) -> None:
     print("=" * len(title))
 
 
-def main() -> None:
-    if len(sys.argv) > 1:
-        question = " ".join(sys.argv[1:])
+def parse_arguments() -> tuple[str, bool, bool]:
+    """
+    Récupère la question et détecte les options.
+
+    Exemples :
+    python scripts/ask_rag.py
+    python scripts/ask_rag.py "Question ici"
+    python scripts/ask_rag.py "Question ici" --ollama
+    python scripts/ask_rag.py "Question ici" --llm
+    """
+
+    args = sys.argv[1:]
+
+    use_ollama = "--ollama" in args
+    use_openai = "--llm" in args
+
+    args = [
+        arg for arg in args
+        if arg not in ["--ollama", "--llm"]
+    ]
+
+    if args:
+        question = " ".join(args)
     else:
         question = "Quels documents prouvent qu'un audit interne a été réalisé ?"
 
-    response = ask_rag(question)
+    return question, use_openai, use_ollama
+
+
+def format_generation_mode(mode: str) -> str:
+    if mode == "ollama":
+        return "Réponse générée avec Ollama local."
+    if mode == "openai":
+        return "Réponse générée avec OpenAI API."
+    return "Réponse générée sans LLM."
+
+
+def main() -> None:
+    question, use_openai, use_ollama = parse_arguments()
+
+    if use_openai and use_ollama:
+        print("Erreur : utilise soit --llm, soit --ollama, mais pas les deux en même temps.")
+        sys.exit(1)
+
+    response = ask_rag(
+        question=question,
+        use_openai=use_openai,
+        use_ollama=use_ollama,
+    )
 
     print_section("Question")
     print(response.question)
+
+    print_section("Mode de génération")
+    print(format_generation_mode(response.generation_mode))
 
     print_section("Réponse")
     print(response.answer)
