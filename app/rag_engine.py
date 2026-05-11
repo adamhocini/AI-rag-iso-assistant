@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from typing import Any, Dict, List
 
+from app.consistency_checker import detect_version_inconsistencies
+
 from app.intent_detector import (
     detect_intent,
     get_intent_context_preferences,
@@ -439,8 +441,13 @@ def ask_rag(
 
     context_extracts = build_extracts(context_results)
 
-    alerts = detect_document_alerts(sources)
-    context_alerts = detect_document_alerts(context_sources)
+    document_alerts = detect_document_alerts(sources)
+    version_alerts = detect_version_inconsistencies(relevant_results)
+    alerts = document_alerts + version_alerts
+
+    context_document_alerts = detect_document_alerts(context_sources)
+    context_version_alerts = detect_version_inconsistencies(context_results)
+    context_alerts = context_document_alerts + context_version_alerts
 
     confidence_score, confidence_label = compute_simple_confidence(
         relevant_results=relevant_results,
