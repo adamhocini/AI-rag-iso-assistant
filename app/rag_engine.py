@@ -454,6 +454,53 @@ def build_confidence_reasons(
     return reasons
 
 
+def post_process_generated_answer(
+    answer: str,
+    sources: List[Dict[str, Any]],
+) -> str:
+    """
+    Corrige certaines affirmations manifestement fausses produites par le LLM.
+
+    Objectif :
+    - ne pas laisser le modèle inventer un statut documentaire ;
+    - garantir que les statuts affichés respectent les métadonnées indexées.
+
+    Exemple :
+    si FP-ACH-001 est au statut Validé, mais que le LLM écrit
+    "FP-ACH-001 est en révision", on ajoute une correction explicite.
+    """
+
+    corrections = []
+
+    for source in sources:
+        reference = source["reference"]
+        statut = source["statut"]
+
+        false_revision_patterns = [
+            f"{reference} est en révision",
+            f"document {reference} est en révision",
+            f"Le document {reference} est en révision",
+        ]
+
+        if statut.lower() == "validé":
+            for pattern in false_revision_patterns:
+                if pattern.lower() in answer.lower():
+                    corrections.append(
+                        f"Correction automatique : {reference} a le statut indexé "
+                        f"'{statut}'. Il ne doit donc pas être présenté comme étant "
+                        "en révision. L'alerte porte sur une différence de version "
+                        "mentionnée dans un autre document."
+                    )
+                    break
+
+    if corrections:
+        correction_block = "\n\n## Corrections automatiques de cohérence\n"
+        correction_block += "\n".join(f"- {correction}" for correction in corrections)
+        return answer + correction_block
+
+    return answer
+
+
 def build_answer_without_llm(
     relevant_results: List[Dict[str, Any]],
     alerts: List[str],
@@ -593,6 +640,10 @@ def ask_rag(
 
             try:
                 answer = generate_answer_with_ollama(prompt)
+                answer = post_process_generated_answer(
+                    answer=answer,
+                    sources=context_sources,
+                )
                 generation_mode = "ollama"
             except RuntimeError as error:
                 answer = (

@@ -48,7 +48,8 @@ def build_ollama_rag_prompt(
     - limiter les hallucinations ;
     - éviter les formulations trop catégoriques ;
     - imposer la citation des sources ;
-    - respecter les statuts documentaires.
+    - respecter les statuts documentaires ;
+    - éviter de confondre incohérence de version et statut en révision.
     """
 
     sources_text = []
@@ -57,8 +58,8 @@ def build_ollama_rag_prompt(
         sources_text.append(
             f"- Référence : {source['reference']}\n"
             f"  Titre : {source['titre']}\n"
-            f"  Version : {source['version']}\n"
-            f"  Statut : {source['statut']}\n"
+            f"  Version actuelle indexée : {source['version']}\n"
+            f"  Statut actuel indexé : {source['statut']}\n"
             f"  Date de validation : {source['date_validation']}\n"
             f"  Type : {source['type_document']}\n"
             f"  Processus : {source['processus']}\n"
@@ -69,8 +70,8 @@ def build_ollama_rag_prompt(
     for index, extract in enumerate(extracts, start=1):
         extracts_text.append(
             f"### EXTRAIT {index}\n"
-            f"Référence : {extract['reference']}\n"
-            f"Titre : {extract['titre']}\n"
+            f"Référence source : {extract['reference']}\n"
+            f"Titre source : {extract['titre']}\n"
             f"Score de similarité : {extract['similarity_score']:.3f}\n"
             f"Texte :\n{extract['text']}\n"
         )
@@ -86,14 +87,17 @@ CONTEXTE :
 - Tu ne remplaces jamais un auditeur, un responsable qualité ou une validation humaine.
 
 RÈGLES ABSOLUES :
-1. Réponds uniquement avec les sources et extraits fournis.
+1. Réponds uniquement avec les sources, extraits et alertes fournis.
 2. N'utilise aucune connaissance externe.
 3. N'invente aucun document, aucune référence, aucune date, aucune preuve.
-4. Si les extraits ne suffisent pas, dis clairement ce qui manque.
-5. Cite les références exactes utilisées, par exemple PROC-AUD-001 ou CR-AUD-2025-001.
-6. Ne cite pas une source si elle n'aide pas réellement à répondre à la question.
-7. Ne donne jamais un niveau de certitude supérieur au niveau calculé par le système.
-8. Ne dis jamais que l'IA remplace une validation humaine.
+4. N'invente jamais un statut documentaire.
+5. Si une source indique "Statut actuel indexé : Validé", tu ne dois jamais dire que ce document est "en révision".
+6. Si une source indique "Statut actuel indexé : En révision", tu dois dire qu'elle est en révision, sans la qualifier automatiquement d'obsolète ou d'invalide.
+7. Si les extraits ne suffisent pas, dis clairement ce qui manque.
+8. Cite les références exactes utilisées, par exemple PROC-AUD-001 ou CR-AUD-2025-001.
+9. Ne cite pas une source si elle n'aide pas réellement à répondre à la question.
+10. Ne donne jamais un niveau de certitude supérieur au niveau calculé par le système.
+11. Ne dis jamais que l'IA remplace une validation humaine.
 
 RÈGLES SUR LES STATUTS DOCUMENTAIRES :
 - Un document au statut "Validé" peut être utilisé comme source applicable dans le cadre du PoC.
@@ -101,7 +105,18 @@ RÈGLES SUR LES STATUTS DOCUMENTAIRES :
 - Un document au statut "En révision" ne doit PAS être décrit comme "obsolète", "invalide" ou "non valide", sauf si un extrait le dit explicitement.
 - Formulation correcte pour un document "En révision" :
   "Le document est en révision ; il ne doit pas être utilisé comme seule référence applicable sans validation humaine."
-- Si une contradiction de version est mentionnée dans les extraits, signale-la comme point de vigilance.
+
+RÈGLES SUR LES INCOHÉRENCES DE VERSION :
+- Une incohérence de version ne signifie PAS que le document actuel est en révision.
+- Une incohérence de version signifie seulement qu'un extrait mentionne une version différente de la version actuelle indexée.
+- Si une alerte dit qu'un document est mentionné en version 1.0 alors que la version actuelle indexée est 1.1, tu dois formuler ainsi :
+  "Le document source mentionne une ancienne version, alors que la version actuelle indexée est différente."
+- Tu dois préciser que cette différence doit être vérifiée par le Responsable Qualité.
+- Tu ne dois PAS transformer une incohérence de version en statut "En révision".
+- Tu ne dois PAS dire qu'un document validé est en révision.
+
+ALERTES SYSTÈME À RESPECTER :
+{alerts_text}
 
 STYLE DE RÉPONSE :
 - Réponds en français.
@@ -120,9 +135,6 @@ Niveau de confiance calculé par le système :
 Sources disponibles :
 {chr(10).join(sources_text) if sources_text else "Aucune source suffisamment pertinente."}
 
-Alertes documentaires :
-{alerts_text}
-
 Extraits autorisés :
 {chr(10).join(extracts_text) if extracts_text else "Aucun extrait suffisamment pertinent."}
 
@@ -136,8 +148,8 @@ Liste uniquement les références réellement utilisées avec leur titre.
 
 ## Points de vigilance
 Mentionne :
-- les documents en révision ;
-- les contradictions de version ;
+- les documents réellement en révision, uniquement si leur statut actuel indexé est "En révision" ;
+- les incohérences de version ;
 - les preuves manquantes ;
 - les limites d'interprétation.
 
@@ -161,8 +173,8 @@ def generate_answer_with_ollama(prompt: str) -> str:
         "prompt": prompt,
         "stream": False,
         "options": {
-            "temperature": 0.1,
-            "top_p": 0.8,
+            "temperature": 0.0,
+            "top_p": 0.7,
             "num_ctx": 8192
         }
     }
