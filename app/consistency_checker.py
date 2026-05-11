@@ -2,14 +2,37 @@ import re
 from typing import Any, Dict, List
 
 
-DOCUMENT_REFERENCE_PATTERN = re.compile(
-    r"\\b([A-Z]{2,}-[A-Z]+-\\d{3}|[A-Z]{2}-[A-Z]{3}-\\d{4}-\\d{3}|[A-Z]{2}-\\d{3})\\b"
-)
+# Références documentaires acceptées dans notre corpus fictif :
+# - MQ-001
+# - FP-ACH-001
+# - REG-AC-001
+# - PROC-DOC-001
+# - PROC-AUD-001
+# - PROC-NC-001
+# - PROC-RISK-001
+# - CR-AUD-2025-001
+DOCUMENT_REFERENCE_REGEX = r"(?:MQ-\d{3}|FP-[A-Z]+-\d{3}|REG-[A-Z]+-\d{3}|PROC-[A-Z]+-\d{3}|CR-[A-Z]+-\d{4}-\d{3})"
 
 VERSION_MENTION_PATTERN = re.compile(
-    r"\\b([A-Z]{2,}-[A-Z]+-\\d{3}|[A-Z]{2}-[A-Z]{3}-\\d{4}-\\d{3}|[A-Z]{2}-\\d{3})\\s+(?:en\\s+)?version\\s+([0-9]+(?:\\.[0-9]+)?)\\b",
+    rf"\b({DOCUMENT_REFERENCE_REGEX})\s+(?:en\s+)?version\s+([0-9]+(?:\.[0-9]+)?)\b",
     re.IGNORECASE,
 )
+
+
+def normalize_reference(reference: str) -> str:
+    """
+    Normalise une référence documentaire.
+    """
+
+    return reference.strip().upper()
+
+
+def normalize_version(version: str) -> str:
+    """
+    Normalise une version documentaire.
+    """
+
+    return version.strip()
 
 
 def build_reference_version_index(results: List[Dict[str, Any]]) -> Dict[str, str]:
@@ -31,7 +54,7 @@ def build_reference_version_index(results: List[Dict[str, Any]]) -> Dict[str, st
         version = metadata.get("version")
 
         if reference and version:
-            index[reference] = version
+            index[normalize_reference(reference)] = normalize_version(version)
 
     return index
 
@@ -42,13 +65,14 @@ def detect_version_mentions(text: str) -> List[Dict[str, str]]:
 
     Exemple détecté :
     FP-ACH-001 version 1.0
+    FP-ACH-001 en version 1.0
     """
 
     mentions = []
 
     for match in VERSION_MENTION_PATTERN.finditer(text):
-        reference = match.group(1).upper()
-        mentioned_version = match.group(2)
+        reference = normalize_reference(match.group(1))
+        mentioned_version = normalize_version(match.group(2))
 
         mentions.append(
             {
@@ -71,8 +95,8 @@ def detect_version_inconsistencies(
     - une version mentionnée dans un extrait ;
     - la version actuelle connue dans les métadonnées indexées.
 
-    Cette version MVP fonctionne uniquement si le document de référence
-    est présent dans les résultats pertinents.
+    Limite actuelle :
+    la version actuelle doit être présente dans les résultats analysés.
     """
 
     version_index = build_reference_version_index(relevant_results)
